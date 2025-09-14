@@ -80,10 +80,15 @@ class Pipe:
         ocr_text, ocr_desc, ocr_category = "", "", ""
         if has_imgs:
             if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": "Running OCR on attached image(s)...", "done": False},
-                })
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Running OCR on attached image(s)...",
+                            "done": False,
+                        },
+                    }
+                )
             # Build OCR+description prompt using the last user message's images/files
             ocr_body = {
                 "model": self.valves.OCR_MODEL_ID,
@@ -106,56 +111,75 @@ class Pipe:
                 if __event_emitter__ and self.valves.SHOW_OCR_RESULTS:
                     preview_text = ocr_text or ""
                     preview_desc = ocr_desc or ""
-                    if self.valves.OCR_MAX_CHARS and len(preview_text) > self.valves.OCR_MAX_CHARS:
-                        preview_text = preview_text[: self.valves.OCR_MAX_CHARS] + "\n\n[...truncated]"
-                    if self.valves.OCR_DESC_MAX_CHARS and len(preview_desc) > self.valves.OCR_DESC_MAX_CHARS:
-                        preview_desc = preview_desc[: self.valves.OCR_DESC_MAX_CHARS] + "\n\n[...truncated]"
+                    if (
+                        self.valves.OCR_MAX_CHARS
+                        and len(preview_text) > self.valves.OCR_MAX_CHARS
+                    ):
+                        preview_text = (
+                            preview_text[: self.valves.OCR_MAX_CHARS]
+                            + "\n\n[...truncated]"
+                        )
+                    if (
+                        self.valves.OCR_DESC_MAX_CHARS
+                        and len(preview_desc) > self.valves.OCR_DESC_MAX_CHARS
+                    ):
+                        preview_desc = (
+                            preview_desc[: self.valves.OCR_DESC_MAX_CHARS]
+                            + "\n\n[...truncated]"
+                        )
 
-                    parts: List[str] = []
-                    parts.append("<details><summary>OCR Results</summary>")
-                    if ocr_category:
-                        parts.append(f"<p><strong>Category:</strong> {ocr_category}</p>")
-                    if preview_text:
-                        parts.append("<p><strong>Text:</strong></p>")
-                        parts.append(f"<pre><code>{preview_text}</code></pre>")
-                    else:
-                        parts.append("<p><strong>Text:</strong> (no visible text)</p>")
+                    preview_lines: List[str] = []
+                    preview_lines.append("<details>")
+                    preview_lines.append("<summary>OCR Results</summary>")
+                    preview_lines.append("")
+                    preview_lines.append(
+                        f"Category: {ocr_category}"
+                        if ocr_category
+                        else "Category: (none)"
+                    )
+                    preview_lines.append("")
+                    preview_lines.append("Text:")
+                    preview_lines.append(preview_text or "(no visible text)")
                     if self.valves.OCR_INCLUDE_DESCRIPTION:
-                        if preview_desc:
-                            parts.append("<p><strong>Description:</strong></p>")
-                            parts.append(f"<blockquote>{preview_desc}</blockquote>")
-                        else:
-                            parts.append("<p><strong>Description:</strong> (none)</p>")
-                    parts.append("</details>")
+                        preview_lines.append("")
+                        preview_lines.append("Description:")
+                        preview_lines.append(preview_desc or "(none)")
+                    preview_lines.append("")
+                    preview_lines.append("</details>")
 
-                    await __event_emitter__({
-                        "type": "message",
-                        "data": {"content": "\n".join(parts)},
-                    })
+                    await __event_emitter__(
+                        {
+                            "type": "message",
+                            "data": {"content": "\n".join(preview_lines)},
+                        }
+                    )
 
                 if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {"description": "OCR complete.", "done": True},
-                    })
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {"description": "OCR complete.", "done": True},
+                        }
+                    )
             except Exception as e:
                 # Fallback to empty results if OCR step fails
                 ocr_text, ocr_desc, ocr_category = "", "", ""
                 if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {"description": f"OCR failed: {e}", "done": True},
-                    })
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {"description": f"OCR failed: {e}", "done": True},
+                        }
+                    )
         else:
-            if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": "No images detected; skipping OCR.", "done": True},
-                })
+            # Intentionally do not emit a "No images detected" status to avoid overriding prior OCR status in the UI.
+            pass
 
         # Prepare the final body for MAIN_MODEL_ID
         final_body = deepcopy(body)
         final_body["model"] = self.valves.MAIN_MODEL_ID
+        # Ensure main call streams by default unless explicitly disabled
+        final_body["stream"] = body.get("stream", True)
 
         # Sanitize messages for MAIN_MODEL_ID (e.g., strip images if the model is not vision capable)
         final_body["messages"] = self._sanitize_messages_for_main(
