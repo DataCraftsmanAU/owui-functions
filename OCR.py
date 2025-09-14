@@ -41,11 +41,6 @@ class Pipe:
             default=True,
             description="Embed an 'OCR Results' details block into the final assistant message so it remains visible after completion."
         )
-        OCR_TOGGLE_POSITION: str = Field(
-            default="top",
-            description="Where to place the OCR toggle in the final assistant message.",
-            json_schema_extra={"enum": ["top", "bottom"]}
-        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -276,10 +271,7 @@ class Pipe:
 
             # Combine per valve position
             if toggle_block:
-                if str(self.valves.OCR_TOGGLE_POSITION).lower() == "bottom":
-                    combined_content = f"{orig_text}\n\n---\n\n{toggle_block}"
-                else:
-                    combined_content = f"{toggle_block}\n\n---\n\n{orig_text}"
+                combined_content = f"{toggle_block}\n\n---\n\n{orig_text}"
             else:
                 combined_content = orig_text
 
