@@ -99,7 +99,12 @@ class Pipe:
                         ptype = str(p.get("type", "")).lower()
                         if ptype in ("image_url", "input_image", "image"):
                             if ptype == "image" and isinstance(p.get("url"), str):
-                                parts.append({"type": "image_url", "image_url": {"url": p["url"]}})
+                                parts.append(
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": p["url"]},
+                                    }
+                                )
                             else:
                                 parts.append(p)
                         elif "image_url" in p or "file_url" in p or "url" in p:
@@ -108,7 +113,9 @@ class Pipe:
                                 url = p["image_url"].get("url")
                             url = url or p.get("file_url") or p.get("url")
                             if isinstance(url, str) and url:
-                                parts.append({"type": "image_url", "image_url": {"url": url}})
+                                parts.append(
+                                    {"type": "image_url", "image_url": {"url": url}}
+                                )
 
                 for url in last_user_images or []:
                     if isinstance(url, str) and url:
@@ -118,7 +125,9 @@ class Pipe:
                     if isinstance(f, dict):
                         url = f.get("url") or f.get("path") or f.get("file_url")
                         if isinstance(url, str) and url:
-                            parts.append({"type": "image_url", "image_url": {"url": url}})
+                            parts.append(
+                                {"type": "image_url", "image_url": {"url": url}}
+                            )
 
                 seen = set()
                 dedup: List[Dict[str, Any]] = []
@@ -136,8 +145,10 @@ class Pipe:
 
             # Build OCR+description prompt using the last user message's images/files
             # Normalize images into content parts and OCR each image individually
-            image_parts: List[Dict[str, Any]] = _normalize_to_image_content_parts_inline(
-                last_user_images, last_user_files, content_image_parts
+            image_parts: List[Dict[str, Any]] = (
+                _normalize_to_image_content_parts_inline(
+                    last_user_images, last_user_files, content_image_parts
+                )
             )
 
             per_texts: List[str] = []
@@ -155,7 +166,10 @@ class Pipe:
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": "Transcribe the attached image per schema."},
+                                {
+                                    "type": "text",
+                                    "text": "Transcribe the attached image per schema.",
+                                },
                                 img_part,
                             ],
                         },
@@ -257,7 +271,9 @@ class Pipe:
                     ptype = str(p.get("type", "")).lower()
                     if ptype in ("image_url", "input_image", "image"):
                         if ptype == "image" and isinstance(p.get("url"), str):
-                            parts.append({"type": "image_url", "image_url": {"url": p["url"]}})
+                            parts.append(
+                                {"type": "image_url", "image_url": {"url": p["url"]}}
+                            )
                         else:
                             parts.append(p)
                     elif "image_url" in p or "file_url" in p or "url" in p:
@@ -267,7 +283,9 @@ class Pipe:
                             url = p["image_url"].get("url")
                         url = url or p.get("file_url") or p.get("url")
                         if isinstance(url, str) and url:
-                            parts.append({"type": "image_url", "image_url": {"url": url}})
+                            parts.append(
+                                {"type": "image_url", "image_url": {"url": url}}
+                            )
 
             # URLs from images array
             for url in last_user_images or []:
@@ -315,7 +333,10 @@ class Pipe:
                             {
                                 "role": "user",
                                 "content": [
-                                    {"type": "text", "text": "Transcribe the attached image per schema."},
+                                    {
+                                        "type": "text",
+                                        "text": "Transcribe the attached image per schema.",
+                                    },
                                     img_part,
                                 ],
                             },
@@ -375,7 +396,12 @@ class Pipe:
                         if isinstance(u, str) and u:
                             new_urls.append(u)
                         elif isinstance(u, dict):
-                            url = u.get("url") or u.get("src") or u.get("image_url") or u.get("file_url")
+                            url = (
+                                u.get("url")
+                                or u.get("src")
+                                or u.get("image_url")
+                                or u.get("file_url")
+                            )
                             if isinstance(url, dict):
                                 nested = url.get("url") or url.get("file_url")
                                 if isinstance(nested, str) and nested:
@@ -388,7 +414,9 @@ class Pipe:
                         if isinstance(f, dict):
                             ftype = (f.get("type") or f.get("mimetype") or "").lower()
                             url = f.get("url") or f.get("path") or f.get("file_url")
-                            if (isinstance(ftype, str) and ftype.startswith("image")) or (isinstance(url, str) and url):
+                            if (
+                                isinstance(ftype, str) and ftype.startswith("image")
+                            ) or (isinstance(url, str) and url):
                                 new_files.append(f)
                                 if isinstance(url, str) and url:
                                     new_urls.append(url)
@@ -397,18 +425,32 @@ class Pipe:
                     for part in content:
                         if isinstance(part, dict):
                             ptype = str(part.get("type", "")).lower()
-                            if ptype in ("image_url", "input_image", "image") or "image_url" in part or "file_url" in part or "url" in part:
+                            if (
+                                ptype in ("image_url", "input_image", "image")
+                                or "image_url" in part
+                                or "file_url" in part
+                                or "url" in part
+                            ):
                                 new_parts.append(part)
 
             # Normalize and dedupe these "new" images
-            def _norm_many(urls: List[str], files: List[Dict[str, Any]], parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            def _norm_many(
+                urls: List[str],
+                files: List[Dict[str, Any]],
+                parts: List[Dict[str, Any]],
+            ) -> List[Dict[str, Any]]:
                 out: List[Dict[str, Any]] = []
                 for p in parts or []:
                     if isinstance(p, dict):
                         ptype = str(p.get("type", "")).lower()
                         if ptype in ("image_url", "input_image", "image"):
                             if ptype == "image" and isinstance(p.get("url"), str):
-                                out.append({"type": "image_url", "image_url": {"url": p["url"]}})
+                                out.append(
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": p["url"]},
+                                    }
+                                )
                             else:
                                 out.append(p)
                         elif "image_url" in p or "file_url" in p or "url" in p:
@@ -417,7 +459,9 @@ class Pipe:
                                 url = p["image_url"].get("url")
                             url = url or p.get("file_url") or p.get("url")
                             if isinstance(url, str) and url:
-                                out.append({"type": "image_url", "image_url": {"url": url}})
+                                out.append(
+                                    {"type": "image_url", "image_url": {"url": url}}
+                                )
                 for u in urls or []:
                     if isinstance(u, str) and u:
                         out.append({"type": "image_url", "image_url": {"url": u}})
@@ -457,7 +501,10 @@ class Pipe:
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": "Transcribe the attached image per schema."},
+                                {
+                                    "type": "text",
+                                    "text": "Transcribe the attached image per schema.",
+                                },
                                 img_part,
                             ],
                         },
@@ -467,12 +514,17 @@ class Pipe:
                         "stream": False,
                         "messages": single_messages,
                     }
-                    ocr_resp = await generate_chat_completion(__request__, single_ocr_body, user, bypass_filter=True)
+                    ocr_resp = await generate_chat_completion(
+                        __request__, single_ocr_body, user, bypass_filter=True
+                    )
                     ocr_raw = self._extract_text_from_response(ocr_resp)
                     t, d, c = self._parse_ocr_structured_output(ocr_raw)
-                    if t: per_texts.append(t)
-                    if d: per_descs.append(d)
-                    if c: per_cats.append(c)
+                    if t:
+                        per_texts.append(t)
+                    if d:
+                        per_descs.append(d)
+                    if c:
+                        per_cats.append(c)
 
                 add_text = "\n\n---\n\n".join(per_texts) if per_texts else ""
                 add_desc = "\n\n---\n\n".join(per_descs) if per_descs else ""
@@ -487,7 +539,13 @@ class Pipe:
                     else:
                         ocr_desc = add_desc
                 if per_cats:
-                    uniq = [c for c in dict.fromkeys(([ocr_category] if ocr_category else []) + per_cats) if c]
+                    uniq = [
+                        c
+                        for c in dict.fromkeys(
+                            ([ocr_category] if ocr_category else []) + per_cats
+                        )
+                        if c
+                    ]
                     ocr_category = ", ".join(uniq)
         except Exception:
             # Non-fatal: continue without incremental OCR merge
@@ -669,8 +727,11 @@ class Pipe:
                         last_user_images.append(u)
                     elif isinstance(u, dict):
                         # common keys that may hold a URL
-                        url = u.get("url") or u.get("src") or u.get("image_url") or u.get(
-                            "file_url"
+                        url = (
+                            u.get("url")
+                            or u.get("src")
+                            or u.get("image_url")
+                            or u.get("file_url")
                         )
                         if isinstance(url, dict):
                             # nested: {"image_url": {"url": "..."}}
@@ -719,8 +780,11 @@ class Pipe:
                 if isinstance(u, str) and u:
                     last_user_images.append(u)
                 elif isinstance(u, dict):
-                    url = u.get("url") or u.get("src") or u.get("image_url") or u.get(
-                        "file_url"
+                    url = (
+                        u.get("url")
+                        or u.get("src")
+                        or u.get("image_url")
+                        or u.get("file_url")
                     )
                     if isinstance(url, dict):
                         nested = url.get("url") or url.get("file_url")
@@ -832,19 +896,19 @@ class Pipe:
         image_urls: List[str] = []
 
         # Add image URLs found in the 'images' array
-        for url in (last_user_images or []):
+        for url in last_user_images or []:
             if isinstance(url, str) and url:
                 image_urls.append(url)
 
         # Add image files that expose a resolvable URL/path
-        for f in (last_user_files or []):
+        for f in last_user_files or []:
             if isinstance(f, dict):
                 url = f.get("url") or f.get("path") or f.get("file_url")
                 if isinstance(url, str) and url:
                     image_urls.append(url)
 
         # Also extract URLs from any existing content image parts
-        for part in (content_image_parts or []):
+        for part in content_image_parts or []:
             if isinstance(part, dict) and part.get("type") in ("image_url", "image"):
                 iu = part.get("image_url") or {}
                 url = iu.get("url") if isinstance(iu, dict) else None
