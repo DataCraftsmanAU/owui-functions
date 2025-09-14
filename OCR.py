@@ -596,6 +596,25 @@ class Pipe:
         )
 
         resp = await generate_chat_completion(__request__, final_body, user)
+
+        # After the final response has finished (streaming or not), send a 'clear' instruction
+        # so the UI hides/removes all prior status/preview emitters.
+        try:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "done",
+                            "done": True,
+                            "hidden": True,
+                            "clear": True,
+                        },
+                    }
+                )
+        except Exception:
+            pass
+
         return resp
 
     # Helper: status dedupe + safe emitter
