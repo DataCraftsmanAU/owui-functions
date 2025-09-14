@@ -1,12 +1,14 @@
 """
-OCR Pipeline Pipe for Open WebUI
-- Step 1: If images are provided, run OCR via OCR_MODEL_ID to extract text.
-- Step 2: Call MAIN_MODEL_ID with the user's prompt and the OCR text.
+Multimodal Reasoning Pipeline Function for Open WebUI
+- Step 1: If images are provided, run OCR via OCR_MODEL_ID to extract text and (when relevant) describe the images.
+- Step 2: Call MAIN_MODEL_ID with the user's prompt plus OCR text/description/category to a reasoning capable model.
 - No external dependencies; uses internal open_webui.generate_chat_completion.
 - Compatible with latest Open WebUI unified endpoint.
 """
+
 from typing import Any, Dict, List, Optional, Tuple
 from copy import deepcopy
+import re
 
 from pydantic import BaseModel, Field
 from fastapi import Request
@@ -19,15 +21,23 @@ class Pipe:
     class Valves(BaseModel):
         OCR_MODEL_ID: str = Field(
             default="mistral-small3.2:24b-instruct-2506-q8_0",
-            description="Model used for OCR (vision-enabled).",
+            description="Model used for OCR extraction/description (vision-enabled).",
         )
         MAIN_MODEL_ID: str = Field(
             default="gpt-oss:20b",
-            description="Model used to answer using OCR text + user prompt.",
+            description="Model used to reason the image + prompt.",
         )
         OCR_MAX_CHARS: int = Field(
-            default=60000,
+            default=50000,
             description="Maximum characters from OCR to inject into the main prompt (truncated if longer).",
+        )
+        OCR_INCLUDE_DESCRIPTION: bool = Field(
+            default=True,
+            description="When true, the OCR step also asks for a detailed image description and a coarse category if relevant.",
+        )
+        OCR_DESC_MAX_CHARS: int = Field(
+            default=50000,
+            description="Maximum characters from OCR description to inject into the main prompt (truncated if longer).",
         )
 
     def __init__(self):
@@ -36,7 +46,7 @@ class Pipe:
     def pipes(self) -> List[Dict[str, str]]:
         # Expose this Pipe as a single selectable "model" in Open WebUI
         return [
-            {"id": "pipe/ocr-compose", "name": "PIPE: OCR ➜ Compose"},
+            {"id": "multimodal-reasoner", "name": "Multimodal Reasoner"},
         ]
 
     async def pipe(
@@ -52,11 +62,13 @@ class Pipe:
         user = Users.get_user_by_id(__user__["id"])
 
         # Detect whether the incoming payload contains images
-        has_imgs, last_user_images, last_user_files, content_image_parts = self._extract_image_artifacts(body)
+        has_imgs, last_user_images, last_user_files, content_image_parts = (
+            self._extract_image_artifacts(body)
+        )
 
-        ocr_text = ""
+        ocr_text, ocr_desc, ocr_category = "", "", ""
         if has_imgs:
-            # Build a minimal OCR prompt using the last user message's images/files
+            # Build OCR+description prompt using the last user message's images/files
             ocr_body = {
                 "model": self.valves.OCR_MODEL_ID,
                 "stream": False,  # Do not stream intermediary OCR to the UI
@@ -69,32 +81,52 @@ class Pipe:
             }
             try:
                 ocr_resp = await generate_chat_completion(__request__, ocr_body, user)
-                ocr_text = self._extract_text_from_response(ocr_resp)
-            except Exception as e:
-                # If OCR step fails for any reason, fallback to empty OCR text
-                ocr_text = ""
+                ocr_raw = self._extract_text_from_response(ocr_resp)
+                ocr_text, ocr_desc, ocr_category = self._parse_ocr_structured_output(
+                    ocr_raw, include_description=self.valves.OCR_INCLUDE_DESCRIPTION
+                )
+            except Exception:
+                # Fallback to empty results if OCR step fails
+                ocr_text, ocr_desc, ocr_category = "", "", ""
 
         # Prepare the final body for MAIN_MODEL_ID
         final_body = deepcopy(body)
         final_body["model"] = self.valves.MAIN_MODEL_ID
 
         # Sanitize messages for MAIN_MODEL_ID (e.g., strip images if the model is not vision capable)
-        final_body["messages"] = self._sanitize_messages_for_main(final_body.get("messages", []))
+        final_body["messages"] = self._sanitize_messages_for_main(
+            final_body.get("messages", [])
+        )
 
-        if ocr_text:
-            # Respect max length to avoid blowing token budgets
-            if len(ocr_text) > self.valves.OCR_MAX_CHARS:
+        if ocr_text or ocr_desc or ocr_category:
+            # Truncate long sections to respect context limits
+            if ocr_text and len(ocr_text) > self.valves.OCR_MAX_CHARS:
                 ocr_text = ocr_text[: self.valves.OCR_MAX_CHARS] + "\n\n[...truncated]"
+            if ocr_desc and len(ocr_desc) > self.valves.OCR_DESC_MAX_CHARS:
+                ocr_desc = (
+                    ocr_desc[: self.valves.OCR_DESC_MAX_CHARS] + "\n\n[...truncated]"
+                )
+
+            context_lines: List[str] = [
+                "Image understanding results extracted from user-provided image(s).",
+                "Use these alongside the user's prompt to answer accurately.",
+                "",
+            ]
+            if ocr_text:
+                context_lines.append("OCR_TEXT:")
+                context_lines.append(ocr_text)
+                context_lines.append("")
+            if self.valves.OCR_INCLUDE_DESCRIPTION and ocr_desc:
+                context_lines.append("OCR_DESCRIPTION:")
+                context_lines.append(ocr_desc)
+                context_lines.append("")
+            if ocr_category:
+                context_lines.append(f"OCR_CATEGORY: {ocr_category}")
 
             ocr_context = {
                 "role": "system",
-                "content": (
-                    "OCR_TEXT extracted from user-provided images follows.\n"
-                    "Use it alongside the user's prompt to answer accurately.\n\n"
-                    f"{ocr_text}"
-                ),
+                "content": "\n".join(context_lines).strip(),
             }
-            # Prepend our OCR context at the beginning so it's available to the model
             final_body["messages"].insert(0, ocr_context)
 
         # Delegate to Open WebUI's unified chat completion (streams if requested)
@@ -173,22 +205,36 @@ class Pipe:
         We favor using the last user message's image artifacts for clarity.
         """
         messages: List[Dict[str, Any]] = []
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "You are an OCR engine. Extract all visible text verbatim from the provided image(s).\n"
-                    "- Preserve natural reading order, line breaks and headings.\n"
-                    "- Do not translate; keep original language.\n"
-                    "- If multiple images, separate each image's text by a blank line and a line with three dashes (---).\n"
-                    "- Return plain text only, no explanations."
-                ),
-            }
+        sys_content = (
+            (
+                "You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image(s).\n"
+                "- Preserve natural reading order, line breaks and headings.\n"
+                "- Do not translate; keep original language.\n"
+                "- Additionally, when it is relevant to understanding user intent (e.g., quiz questions, UI screenshots, diagrams, charts, math problems, slides, whiteboards, handwritten notes, or complex scenes), include a detailed but concise description of the image(s).\n"
+                "- Always format your response using this schema:\n"
+                "TEXT:\n"
+                "<transcribed text>\n\n"
+                "---\n"
+                "DESCRIPTION:\n"
+                "<description or 'N/A'>\n\n"
+                "---\n"
+                "CATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other\n"
+                "- If multiple images are present, separate each image's transcribed text in TEXT with blank lines and a line containing three dashes (---)."
+            )
+            if self.valves.OCR_INCLUDE_DESCRIPTION
+            else (
+                "You are an OCR engine. Extract all visible text verbatim from the provided image(s).\n"
+                "- Preserve natural reading order, line breaks and headings.\n"
+                "- Do not translate; keep original language.\n"
+                "- If multiple images, separate each image's text by a blank line and a line with three dashes (---).\n"
+                "- Return plain text only, no explanations."
+            )
         )
+        messages.append({"role": "system", "content": sys_content})
 
         user_msg: Dict[str, Any] = {
             "role": "user",
-            "content": "Transcribe all text from the attached image(s).",
+            "content": "Transcribe all text from the attached image(s). If requested, also provide a description and a category following the schema.",
         }
 
         # Provide multiple representations to maximize compatibility with providers
@@ -200,7 +246,10 @@ class Pipe:
 
         if content_image_parts:
             user_msg["content"] = [
-                {"type": "text", "text": "Transcribe all text from the attached image(s)."}
+                {
+                    "type": "text",
+                    "text": "Transcribe all text from the attached image(s). If requested, also provide a description and a category following the schema.",
+                }
             ] + content_image_parts
 
         messages.append(user_msg)
@@ -222,7 +271,115 @@ class Pipe:
             pass
         return ""
 
-    def _sanitize_messages_for_main(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _parse_ocr_structured_output(
+        self, text: str, include_description: bool
+    ) -> Tuple[str, str, str]:
+        """
+        Parse OCR model output into (text, description, category).
+        Accepts both the structured schema (TEXT/DESCRIPTION/CATEGORY) and plain text.
+        Returns empty strings for missing parts.
+        """
+        if not isinstance(text, str) or not text.strip():
+            return "", "", ""
+
+        raw = text.strip()
+
+        # If the schema isn't present at all, treat entire content as text
+        lowered = raw.lower()
+        has_markers = (
+            ("text:" in lowered)
+            or ("description:" in lowered)
+            or ("category:" in lowered)
+        )
+
+        text_lines: List[str] = []
+        desc_lines: List[str] = []
+        category: str = ""
+
+        if not has_markers:
+            # No structured markers: best-effort fallback
+            return raw, "", ""
+
+        current = None  # "text" or "description"
+        # Precompile regex patterns
+        re_text_hdr = re.compile(r"^\s*text\s*:\s*$", re.IGNORECASE)
+        re_desc_hdr = re.compile(r"^\s*description\s*:\s*$", re.IGNORECASE)
+        re_cat_line = re.compile(r"^\s*category\s*:\s*(.+?)\s*$", re.IGNORECASE)
+        re_sep_line = re.compile(r"^\s*---\s*$")
+
+        for line in raw.splitlines():
+            if re_text_hdr.match(line):
+                current = "text"
+                continue
+            if re_desc_hdr.match(line):
+                current = "description"
+                continue
+            m = re_cat_line.match(line)
+            if m:
+                category = m.group(1).strip()
+                continue
+            if re_sep_line.match(line):
+                # explicit separator, skip
+                continue
+
+            if current == "description":
+                desc_lines.append(line)
+            else:
+                # default to text section when current is None or "text"
+                text_lines.append(line)
+
+        ocr_text = "\n".join(text_lines).strip()
+        ocr_desc = "\n".join(desc_lines).strip()
+
+        # Normalize category
+        if category:
+            c = category.strip().lower()
+            c = c.replace("-", "_").replace(" ", "_")
+            allowed = {
+                "screenshot",
+                "document",
+                "diagram",
+                "math",
+                "slide",
+                "whiteboard",
+                "handwritten_note",
+                "photo",
+                "other",
+            }
+            # Simple normalization for a few common synonyms
+            synonyms = {
+                "handwritten": "handwritten_note",
+                "handwriting": "handwritten_note",
+                "webpage": "screenshot",
+                "ui": "screenshot",
+                "screen": "screenshot",
+                "picture": "photo",
+                "image": "photo",
+            }
+            c = synonyms.get(c, c)
+            if c not in allowed:
+                # Try to map by prefix
+                for a in allowed:
+                    if c.startswith(a):
+                        c = a
+                        break
+                else:
+                    c = ""
+            category = c
+
+        # If description is not included, drop it
+        if not include_description:
+            ocr_desc = ""
+
+        # Treat "N/A" as empty
+        if ocr_desc.lower() in {"n/a", "na", "none", "no description"}:
+            ocr_desc = ""
+
+        return ocr_text, ocr_desc, category
+
+    def _sanitize_messages_for_main(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """
         Remove image artifacts from messages to avoid issues with non-vision MAIN_MODEL_ID.
         """
