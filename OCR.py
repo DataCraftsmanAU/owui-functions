@@ -3,7 +3,7 @@ title: Multimodal Reasoning Pipe
 author: Michael Jennings
 author_url: https://datacraftsman.com.au
 funding_url: https://github.com/DataCraftsmanAU/owui-functions/
-version: 0.1
+version: 1.0
 license: MIT
 """
 
@@ -39,11 +39,11 @@ class Pipe:
             description="Maximum characters from OCR description to inject into the main prompt (truncated if longer).",
         )
         UI_MODEL_ID: str = Field(
-            default="multimodal-reasoner",
+            default="gpt-oss-20b-vision",
             description="Identifier of this pipe as shown in the model list.",
         )
         UI_MODEL_NAME: str = Field(
-            default="Multimodal Reasoner",
+            default="gpt-oss-20b (vision)",
             description="Display name of this pipe as shown in the model list.",
         )
         SHOW_OCR_RESULTS: bool = Field(
