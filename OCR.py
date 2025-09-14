@@ -587,30 +587,15 @@ class Pipe:
             final_body["messages"].insert(0, ocr_context)
 
         # Delegate to Open WebUI's unified chat completion (streams if requested)
+        # Emit a single "composing" status before the provider call
         await self._emit_status_once(
-            f"Composing final answer using {self.valves.MAIN_MODEL_ID}...",
+            f"Composing response using {self.valves.MAIN_MODEL_ID}...",
             False,
             __event_emitter__,
             hidden=False,
         )
+
         resp = await generate_chat_completion(__request__, final_body, user)
-
-        # If streaming, wrap to emit completion status once
-        if final_body.get("stream", True):
-            if __event_emitter__:
-
-                async def on_done():
-                    await self._emit_status_once(
-                        "Final answer complete.", True, __event_emitter__, hidden=False
-                    )
-
-                return self._wrap_stream(resp, on_done)
-            return resp
-
-        # Non-streaming: just emit completion
-        await self._emit_status_once(
-            "Final answer complete.", True, __event_emitter__, hidden=False
-        )
         return resp
 
     # Helper: status dedupe + safe emitter
@@ -624,11 +609,23 @@ class Pipe:
         if not __event_emitter__:
             return
         try:
+            # Strong de-duplication: suppress re-emitting the same final-completion marker entirely.
+            completion_keys = {"Final answer complete.", "Answer composition finished."}
+            if description in completion_keys:
+                if getattr(self, "_completion_emitted", False):
+                    return
+                # mark as emitted
+                self._completion_emitted = True
+
             now = time.time()
-            ttl = 30.0
-            last = self._status_last_emit.get(description, 0.0)
+            # Lightweight dedupe for other statuses
+            ttl = 3.0
+            # Use a composite key that includes the 'done' flag to avoid re-sending a finished status
+            key = f"{description}|{int(done)}"
+            last = self._status_last_emit.get(key, 0.0)
             if ttl > 0 and (now - last) < ttl:
                 return
+
             await __event_emitter__(
                 {
                     "type": "status",
@@ -639,7 +636,7 @@ class Pipe:
                     },
                 }
             )
-            self._status_last_emit[description] = now
+            self._status_last_emit[key] = now
         except Exception:
             # Do not let status errors break the main flow
             pass
@@ -650,6 +647,10 @@ class Pipe:
         stream_obj: Any,
         on_done: Callable[[], Coroutine[Any, Any, None]],
     ):
+        # Reset completion flag for each new completion sequence
+        self._completion_emitted = False
+        # Reset flags for each new stream/completion sequence
+        self._completion_emitted = False
         # Async stream
         if hasattr(stream_obj, "__aiter__"):
 
@@ -667,6 +668,8 @@ class Pipe:
 
         # Sync iterator
         if hasattr(stream_obj, "__iter__"):
+            self._completion_emitted = False
+            self._completion_emitted = False
 
             def gen():
                 try:
@@ -695,6 +698,9 @@ class Pipe:
                 asyncio.run(coro)
         except Exception:
             pass
+        finally:
+            # ensure flags reset even on unknown stream types
+            self._composing_active = False
         return stream_obj
 
     def _extract_image_artifacts(
