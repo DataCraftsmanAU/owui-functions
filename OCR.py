@@ -10,6 +10,7 @@ license: MIT
 from typing import Any, Dict, List, Optional, Tuple, Callable, Awaitable
 from copy import deepcopy
 import re
+import time
 
 from pydantic import BaseModel, Field
 from fastapi import Request
@@ -35,6 +36,15 @@ class Pipe:
         OCR_DESC_MAX_CHARS: int = Field(
             default=50000,
             description="Maximum characters from OCR description to inject into the main prompt (truncated if longer).",
+        )
+        MERGE_OCR_TOGGLE_INTO_FINAL: bool = Field(
+            default=True,
+            description="Embed an 'OCR Results' details block into the final assistant message so it remains visible after completion."
+        )
+        OCR_TOGGLE_POSITION: str = Field(
+            default="top",
+            description="Where to place the OCR toggle in the final assistant message.",
+            json_schema_extra={"enum": ["top", "bottom"]}
         )
 
     def __init__(self):
@@ -73,8 +83,9 @@ class Pipe:
                     {
                         "type": "status",
                         "data": {
-                            "description": "Running OCR on attached image(s)...",
+                            "description": f"Running OCR on attached image(s) using {self.valves.OCR_MODEL_ID}...",
                             "done": False,
+                            "hidden": False,
                         },
                     }
                 )
@@ -97,7 +108,7 @@ class Pipe:
                 )
 
                 # Emit OCR preview to user
-                if __event_emitter__:
+                if __event_emitter__ and not self.valves.MERGE_OCR_TOGGLE_INTO_FINAL:
                     preview_text = ocr_text or ""
                     preview_desc = ocr_desc or ""
                     if (
@@ -138,7 +149,16 @@ class Pipe:
                     await __event_emitter__(
                         {
                             "type": "message",
-                            "data": {"content": "\n".join(preview_lines)},
+                            "data": {
+                                "id": f"ocr-preview-{int(time.time() * 1000)}",
+                                "role": "tool",
+                                "name": "ocr",
+                                "content": "\n".join(preview_lines),
+                                "mime_type": "text/markdown",
+                                "meta": {"pinned": True, "label": "OCR Results"},
+                                "persist": True,
+                                "replace": False
+                            },
                         }
                     )
 
@@ -146,7 +166,7 @@ class Pipe:
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "OCR complete.", "done": True},
+                            "data": {"description": "OCR complete.", "done": True, "hidden": False},
                         }
                     )
             except Exception as e:
@@ -156,7 +176,7 @@ class Pipe:
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": f"OCR failed: {e}", "done": True},
+                            "data": {"description": f"OCR failed: {e}", "done": True, "hidden": False},
                         }
                     )
         else:
@@ -206,6 +226,85 @@ class Pipe:
             final_body["messages"].insert(0, ocr_context)
 
         # Delegate to Open WebUI's unified chat completion (streams if requested)
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"Composing final answer using {self.valves.MAIN_MODEL_ID}...",
+                        "done": False,
+                        "hidden": False,
+                    },
+                }
+            )
+        if self.valves.MERGE_OCR_TOGGLE_INTO_FINAL:
+            # Force non-stream to allow merging the OCR toggle into the final message
+            final_body["stream"] = False
+            main_resp = await generate_chat_completion(__request__, final_body, user)
+
+            # Extract original assistant text
+            orig_text = ""
+            try:
+                orig_text = self._extract_text_from_response(main_resp)
+            except Exception:
+                orig_text = ""
+
+            # Build OCR toggle if we have OCR results
+            toggle_block = ""
+            if ocr_text or ocr_desc or ocr_category:
+                preview_text = ocr_text or ""
+                preview_desc = ocr_desc or ""
+                if self.valves.OCR_MAX_CHARS and len(preview_text) > self.valves.OCR_MAX_CHARS:
+                    preview_text = preview_text[: self.valves.OCR_MAX_CHARS] + "\n\n[...truncated]"
+                if self.valves.OCR_DESC_MAX_CHARS and len(preview_desc) > self.valves.OCR_DESC_MAX_CHARS:
+                    preview_desc = preview_desc[: self.valves.OCR_DESC_MAX_CHARS] + "\n\n[...truncated]"
+
+                lines: List[str] = []
+                lines.append("<details>")
+                lines.append("<summary>OCR Results</summary>")
+                lines.append("")
+                lines.append(f"Category: {ocr_category}" if ocr_category else "Category: (none)")
+                lines.append("")
+                lines.append("Text:")
+                lines.append(preview_text or "(no visible text)")
+                lines.append("")
+                lines.append("Description:")
+                lines.append(preview_desc or "(none)")
+                lines.append("")
+                lines.append("</details>")
+                toggle_block = "\n".join(lines)
+
+            # Combine per valve position
+            if toggle_block:
+                if str(self.valves.OCR_TOGGLE_POSITION).lower() == "bottom":
+                    combined_content = f"{orig_text}\n\n---\n\n{toggle_block}"
+                else:
+                    combined_content = f"{toggle_block}\n\n---\n\n{orig_text}"
+            else:
+                combined_content = orig_text
+
+            # Write back combined content
+            try:
+                if isinstance(main_resp, dict) and "choices" in main_resp and main_resp["choices"]:
+                    if "message" in main_resp["choices"][0] and isinstance(main_resp["choices"][0]["message"], dict):
+                        main_resp["choices"][0]["message"]["content"] = combined_content
+            except Exception:
+                pass
+
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Final answer complete.",
+                            "done": True,
+                            "hidden": False,
+                        },
+                    }
+                )
+
+            return main_resp
+
         return await generate_chat_completion(__request__, final_body, user)
 
     def _extract_image_artifacts(
