@@ -84,8 +84,54 @@ class Pipe:
 
         ocr_text, ocr_desc, ocr_category = "", "", ""
         if has_imgs:
+            # Compute number of images to be processed
+            try:
+                image_count = 0
+                # Normalize all detected image artifacts into a single list to count
+                def _count_images_for_status(
+                    last_user_images: List[str],
+                    last_user_files: List[Dict[str, Any]],
+                    content_image_parts: List[Dict[str, Any]],
+                ) -> int:
+                    urls: List[str] = []
+                    # from images array
+                    for u in last_user_images or []:
+                        if isinstance(u, str) and u:
+                            urls.append(u)
+                    # from files
+                    for f in last_user_files or []:
+                        if isinstance(f, dict):
+                            u = f.get("url") or f.get("path") or f.get("file_url")
+                            if isinstance(u, str) and u:
+                                urls.append(u)
+                    # from content parts
+                    for p in content_image_parts or []:
+                        if isinstance(p, dict):
+                            ptype = str(p.get("type", "")).lower()
+                            if ptype in ("image_url", "input_image", "image"):
+                                iu = p.get("image_url")
+                                if isinstance(iu, dict):
+                                    u = iu.get("url") or iu.get("file_url")
+                                    if isinstance(u, str) and u:
+                                        urls.append(u)
+                                elif isinstance(iu, str) and iu:
+                                    urls.append(iu)
+                            else:
+                                # fallback generic url fields
+                                u = p.get("url") or p.get("path") or p.get("file_url")
+                                if isinstance(u, str) and u:
+                                    urls.append(u)
+                    # dedupe
+                    return len(list(dict.fromkeys([u for u in urls if isinstance(u, str) and u])))
+
+                image_count = _count_images_for_status(
+                    last_user_images, last_user_files, content_image_parts
+                )
+            except Exception:
+                image_count = 0
+
             await self._emit_status_once(
-                f"Running OCR on attached image(s) using {self.valves.OCR_MODEL_ID}...",
+                f"Running OCR on {image_count} image(s) using {self.valves.OCR_MODEL_ID}...",
                 False,
                 __event_emitter__,
                 hidden=False,
