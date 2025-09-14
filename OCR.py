@@ -6,7 +6,7 @@ Multimodal Reasoning Pipeline Function for Open WebUI
 - Compatible with latest Open WebUI unified endpoint.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable, Awaitable
 from copy import deepcopy
 import re
 
@@ -39,6 +39,14 @@ class Pipe:
             default=50000,
             description="Maximum characters from OCR description to inject into the main prompt (truncated if longer).",
         )
+        SHOW_OCR_RESULTS: bool = Field(
+            default=True,
+            description="Emit OCR results to the chat via event emitter as a preview message.",
+        )
+        SHOW_OCR_STATUS: bool = Field(
+            default=True,
+            description="Emit OCR status updates (start/complete/skip/fail).",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -54,6 +62,9 @@ class Pipe:
         body: Dict[str, Any],
         __user__: Dict[str, Any],
         __request__: Request,
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+        __model__: Optional[dict] = None,
+        __id__: Optional[str] = None,
     ):
         """
         Main entrypoint. Optionally runs an OCR step, then composes the final answer with MAIN_MODEL_ID.
@@ -68,6 +79,11 @@ class Pipe:
 
         ocr_text, ocr_desc, ocr_category = "", "", ""
         if has_imgs:
+            if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": "Running OCR on attached image(s)...", "done": False},
+                })
             # Build OCR+description prompt using the last user message's images/files
             ocr_body = {
                 "model": self.valves.OCR_MODEL_ID,
@@ -85,9 +101,57 @@ class Pipe:
                 ocr_text, ocr_desc, ocr_category = self._parse_ocr_structured_output(
                     ocr_raw, include_description=self.valves.OCR_INCLUDE_DESCRIPTION
                 )
-            except Exception:
+
+                # Emit OCR preview to user
+                if __event_emitter__ and self.valves.SHOW_OCR_RESULTS:
+                    preview_text = ocr_text or ""
+                    preview_desc = ocr_desc or ""
+                    if self.valves.OCR_MAX_CHARS and len(preview_text) > self.valves.OCR_MAX_CHARS:
+                        preview_text = preview_text[: self.valves.OCR_MAX_CHARS] + "\n\n[...truncated]"
+                    if self.valves.OCR_DESC_MAX_CHARS and len(preview_desc) > self.valves.OCR_DESC_MAX_CHARS:
+                        preview_desc = preview_desc[: self.valves.OCR_DESC_MAX_CHARS] + "\n\n[...truncated]"
+
+                    parts: List[str] = []
+                    parts.append("<details><summary>OCR Results</summary>")
+                    if ocr_category:
+                        parts.append(f"<p><strong>Category:</strong> {ocr_category}</p>")
+                    if preview_text:
+                        parts.append("<p><strong>Text:</strong></p>")
+                        parts.append(f"<pre><code>{preview_text}</code></pre>")
+                    else:
+                        parts.append("<p><strong>Text:</strong> (no visible text)</p>")
+                    if self.valves.OCR_INCLUDE_DESCRIPTION:
+                        if preview_desc:
+                            parts.append("<p><strong>Description:</strong></p>")
+                            parts.append(f"<blockquote>{preview_desc}</blockquote>")
+                        else:
+                            parts.append("<p><strong>Description:</strong> (none)</p>")
+                    parts.append("</details>")
+
+                    await __event_emitter__({
+                        "type": "message",
+                        "data": {"content": "\n".join(parts)},
+                    })
+
+                if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {"description": "OCR complete.", "done": True},
+                    })
+            except Exception as e:
                 # Fallback to empty results if OCR step fails
                 ocr_text, ocr_desc, ocr_category = "", "", ""
+                if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {"description": f"OCR failed: {e}", "done": True},
+                    })
+        else:
+            if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": "No images detected; skipping OCR.", "done": True},
+                })
 
         # Prepare the final body for MAIN_MODEL_ID
         final_body = deepcopy(body)
