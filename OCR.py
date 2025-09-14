@@ -1,9 +1,10 @@
 """
-Multimodal Reasoning Pipeline Function for Open WebUI
-- Step 1: If images are provided, run OCR via OCR_MODEL_ID to extract text and (when relevant) describe the images.
-- Step 2: Call MAIN_MODEL_ID with the user's prompt plus OCR text/description/category to a reasoning capable model.
-- No external dependencies; uses internal open_webui.generate_chat_completion.
-- Compatible with latest Open WebUI unified endpoint.
+title: Multimodal Reasoning Pipe
+author: Michael Jennings
+author_url: https://datacraftsman.com.au
+funding_url: https://github.com/DataCraftsmanAU/owui-functions/
+version: 0.1
+license: MIT
 """
 
 from typing import Any, Dict, List, Optional, Tuple, Callable, Awaitable
@@ -20,7 +21,7 @@ from open_webui.utils.chat import generate_chat_completion
 class Pipe:
     class Valves(BaseModel):
         OCR_MODEL_ID: str = Field(
-            default="mistral-small3.2:24b-instruct-2506-q8_0",
+            default="gemma3:12b",
             description="Model used for OCR extraction/description (vision-enabled).",
         )
         MAIN_MODEL_ID: str = Field(
@@ -31,21 +32,9 @@ class Pipe:
             default=50000,
             description="Maximum characters from OCR to inject into the main prompt (truncated if longer).",
         )
-        OCR_INCLUDE_DESCRIPTION: bool = Field(
-            default=True,
-            description="When true, the OCR step also asks for a detailed image description and a coarse category if relevant.",
-        )
         OCR_DESC_MAX_CHARS: int = Field(
             default=50000,
             description="Maximum characters from OCR description to inject into the main prompt (truncated if longer).",
-        )
-        SHOW_OCR_RESULTS: bool = Field(
-            default=True,
-            description="Emit OCR results to the chat via event emitter as a preview message.",
-        )
-        SHOW_OCR_STATUS: bool = Field(
-            default=True,
-            description="Emit OCR status updates (start/complete/skip/fail).",
         )
 
     def __init__(self):
@@ -79,7 +68,7 @@ class Pipe:
 
         ocr_text, ocr_desc, ocr_category = "", "", ""
         if has_imgs:
-            if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
+            if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
@@ -104,11 +93,11 @@ class Pipe:
                 ocr_resp = await generate_chat_completion(__request__, ocr_body, user)
                 ocr_raw = self._extract_text_from_response(ocr_resp)
                 ocr_text, ocr_desc, ocr_category = self._parse_ocr_structured_output(
-                    ocr_raw, include_description=self.valves.OCR_INCLUDE_DESCRIPTION
+                    ocr_raw
                 )
 
                 # Emit OCR preview to user
-                if __event_emitter__ and self.valves.SHOW_OCR_RESULTS:
+                if __event_emitter__:
                     preview_text = ocr_text or ""
                     preview_desc = ocr_desc or ""
                     if (
@@ -140,10 +129,9 @@ class Pipe:
                     preview_lines.append("")
                     preview_lines.append("Text:")
                     preview_lines.append(preview_text or "(no visible text)")
-                    if self.valves.OCR_INCLUDE_DESCRIPTION:
-                        preview_lines.append("")
-                        preview_lines.append("Description:")
-                        preview_lines.append(preview_desc or "(none)")
+                    preview_lines.append("")
+                    preview_lines.append("Description:")
+                    preview_lines.append(preview_desc or "(none)")
                     preview_lines.append("")
                     preview_lines.append("</details>")
 
@@ -154,7 +142,7 @@ class Pipe:
                         }
                     )
 
-                if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
+                if __event_emitter__:
                     await __event_emitter__(
                         {
                             "type": "status",
@@ -164,7 +152,7 @@ class Pipe:
             except Exception as e:
                 # Fallback to empty results if OCR step fails
                 ocr_text, ocr_desc, ocr_category = "", "", ""
-                if __event_emitter__ and self.valves.SHOW_OCR_STATUS:
+                if __event_emitter__:
                     await __event_emitter__(
                         {
                             "type": "status",
@@ -204,7 +192,7 @@ class Pipe:
                 context_lines.append("OCR_TEXT:")
                 context_lines.append(ocr_text)
                 context_lines.append("")
-            if self.valves.OCR_INCLUDE_DESCRIPTION and ocr_desc:
+            if ocr_desc:
                 context_lines.append("OCR_DESCRIPTION:")
                 context_lines.append(ocr_desc)
                 context_lines.append("")
@@ -294,29 +282,19 @@ class Pipe:
         """
         messages: List[Dict[str, Any]] = []
         sys_content = (
-            (
-                "You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image(s).\n"
-                "- Preserve natural reading order, line breaks and headings.\n"
-                "- Do not translate; keep original language.\n"
-                "- Additionally, when it is relevant to understanding user intent (e.g., quiz questions, UI screenshots, diagrams, charts, math problems, slides, whiteboards, handwritten notes, or complex scenes), include a detailed but concise description of the image(s).\n"
-                "- Always format your response using this schema:\n"
-                "TEXT:\n"
-                "<transcribed text>\n\n"
-                "---\n"
-                "DESCRIPTION:\n"
-                "<description or 'N/A'>\n\n"
-                "---\n"
-                "CATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other\n"
-                "- If multiple images are present, separate each image's transcribed text in TEXT with blank lines and a line containing three dashes (---)."
-            )
-            if self.valves.OCR_INCLUDE_DESCRIPTION
-            else (
-                "You are an OCR engine. Extract all visible text verbatim from the provided image(s).\n"
-                "- Preserve natural reading order, line breaks and headings.\n"
-                "- Do not translate; keep original language.\n"
-                "- If multiple images, separate each image's text by a blank line and a line with three dashes (---).\n"
-                "- Return plain text only, no explanations."
-            )
+            "You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image(s).\n"
+            "- Preserve natural reading order, line breaks and headings.\n"
+            "- Do not translate; keep original language.\n"
+            "- Additionally, when it is relevant to understanding user intent (e.g., quiz questions, UI screenshots, diagrams, charts, math problems, slides, whiteboards, handwritten notes, or complex scenes), include a detailed but concise description of the image(s).\n"
+            "- Always format your response using this schema:\n"
+            "TEXT:\n"
+            "<transcribed text>\n\n"
+            "---\n"
+            "DESCRIPTION:\n"
+            "<description or 'N/A'>\n\n"
+            "---\n"
+            "CATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other\n"
+            "- If multiple images are present, separate each image's transcribed text in TEXT with blank lines and a line containing three dashes (---)."
         )
         messages.append({"role": "system", "content": sys_content})
 
@@ -359,9 +337,7 @@ class Pipe:
             pass
         return ""
 
-    def _parse_ocr_structured_output(
-        self, text: str, include_description: bool
-    ) -> Tuple[str, str, str]:
+    def _parse_ocr_structured_output(self, text: str) -> Tuple[str, str, str]:
         """
         Parse OCR model output into (text, description, category).
         Accepts both the structured schema (TEXT/DESCRIPTION/CATEGORY) and plain text.
@@ -454,10 +430,6 @@ class Pipe:
                 else:
                     c = ""
             category = c
-
-        # If description is not included, drop it
-        if not include_description:
-            ocr_desc = ""
 
         # Treat "N/A" as empty
         if ocr_desc.lower() in {"n/a", "na", "none", "no description"}:
