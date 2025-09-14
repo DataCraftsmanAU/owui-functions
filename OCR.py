@@ -7,10 +7,11 @@ version: 0.1
 license: MIT
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Tuple, Callable, Coroutine, Awaitable
 from copy import deepcopy
 import re
 import time
+import asyncio
 
 from pydantic import BaseModel, Field
 from fastapi import Request
@@ -29,6 +30,10 @@ class Pipe:
             default="gpt-oss:20b",
             description="Model used to reason the image + prompt.",
         )
+        STREAM_FINAL: bool = Field(
+            default=True,
+            description="Stream the MAIN_MODEL_ID output in real-time. If True and MERGE_OCR_TOGGLE_INTO_FINAL is True, merging will be disabled and OCR results will be sent as a pinned message instead.",
+        )
         OCR_MAX_CHARS: int = Field(
             default=50000,
             description="Maximum characters from OCR to inject into the main prompt (truncated if longer).",
@@ -38,12 +43,18 @@ class Pipe:
             description="Maximum characters from OCR description to inject into the main prompt (truncated if longer).",
         )
         MERGE_OCR_TOGGLE_INTO_FINAL: bool = Field(
-            default=True,
-            description="Embed an 'OCR Results' details block into the final assistant message so it remains visible after completion."
+            default=False,
+            description="Embed an 'OCR Results' details block into the final assistant message so it remains visible after completion. Requires STREAM_FINAL=False.",
+        )
+        STATUS_DEDUP_WINDOW_SEC: float = Field(
+            default=30.0,
+            description="Dedup window for status messages to prevent duplicate emissions across repeated invocations.",
         )
 
     def __init__(self):
         self.valves = self.Valves()
+        # Deduplicate repeating status messages across rapid successive invocations
+        self._status_last_emit: Dict[str, float] = {}
 
     def pipes(self) -> List[Dict[str, str]]:
         # Expose this Pipe as a single selectable "model" in Open WebUI
@@ -73,17 +84,12 @@ class Pipe:
 
         ocr_text, ocr_desc, ocr_category = "", "", ""
         if has_imgs:
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Running OCR on attached image(s) using {self.valves.OCR_MODEL_ID}...",
-                            "done": False,
-                            "hidden": False,
-                        },
-                    }
-                )
+            await self._emit_status_once(
+                f"Running OCR on attached image(s) using {self.valves.OCR_MODEL_ID}...",
+                False,
+                __event_emitter__,
+                hidden=False,
+            )
             # Build OCR+description prompt using the last user message's images/files
             ocr_body = {
                 "model": self.valves.OCR_MODEL_ID,
@@ -96,14 +102,19 @@ class Pipe:
                 ),
             }
             try:
-                ocr_resp = await generate_chat_completion(__request__, ocr_body, user)
+                ocr_resp = await generate_chat_completion(
+                    __request__, ocr_body, user, bypass_filter=True
+                )
                 ocr_raw = self._extract_text_from_response(ocr_resp)
                 ocr_text, ocr_desc, ocr_category = self._parse_ocr_structured_output(
                     ocr_raw
                 )
 
                 # Emit OCR preview to user
-                if __event_emitter__ and not self.valves.MERGE_OCR_TOGGLE_INTO_FINAL:
+                if __event_emitter__ and (
+                    not self.valves.MERGE_OCR_TOGGLE_INTO_FINAL
+                    or self.valves.STREAM_FINAL
+                ):
                     preview_text = ocr_text or ""
                     preview_desc = ocr_desc or ""
                     if (
@@ -152,28 +163,20 @@ class Pipe:
                                 "mime_type": "text/markdown",
                                 "meta": {"pinned": True, "label": "OCR Results"},
                                 "persist": True,
-                                "replace": False
+                                "replace": False,
                             },
                         }
                     )
 
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {"description": "OCR complete.", "done": True, "hidden": False},
-                        }
-                    )
+                await self._emit_status_once(
+                    "OCR complete.", True, __event_emitter__, hidden=False
+                )
             except Exception as e:
                 # Fallback to empty results if OCR step fails
                 ocr_text, ocr_desc, ocr_category = "", "", ""
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {"description": f"OCR failed: {e}", "done": True, "hidden": False},
-                        }
-                    )
+                await self._emit_status_once(
+                    f"OCR failed: {e}", True, __event_emitter__, hidden=False
+                )
         else:
             # Intentionally do not emit a "No images detected" status to avoid overriding prior OCR status in the UI.
             pass
@@ -221,19 +224,14 @@ class Pipe:
             final_body["messages"].insert(0, ocr_context)
 
         # Delegate to Open WebUI's unified chat completion (streams if requested)
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"Composing final answer using {self.valves.MAIN_MODEL_ID}...",
-                        "done": False,
-                        "hidden": False,
-                    },
-                }
-            )
-        if self.valves.MERGE_OCR_TOGGLE_INTO_FINAL:
-            # Force non-stream to allow merging the OCR toggle into the final message
+        await self._emit_status_once(
+            f"Composing final answer using {self.valves.MAIN_MODEL_ID}...",
+            False,
+            __event_emitter__,
+            hidden=False,
+        )
+        if self.valves.MERGE_OCR_TOGGLE_INTO_FINAL and not self.valves.STREAM_FINAL:
+            # Force non-stream for merge mode
             final_body["stream"] = False
             main_resp = await generate_chat_completion(__request__, final_body, user)
 
@@ -249,16 +247,29 @@ class Pipe:
             if ocr_text or ocr_desc or ocr_category:
                 preview_text = ocr_text or ""
                 preview_desc = ocr_desc or ""
-                if self.valves.OCR_MAX_CHARS and len(preview_text) > self.valves.OCR_MAX_CHARS:
-                    preview_text = preview_text[: self.valves.OCR_MAX_CHARS] + "\n\n[...truncated]"
-                if self.valves.OCR_DESC_MAX_CHARS and len(preview_desc) > self.valves.OCR_DESC_MAX_CHARS:
-                    preview_desc = preview_desc[: self.valves.OCR_DESC_MAX_CHARS] + "\n\n[...truncated]"
+                if (
+                    self.valves.OCR_MAX_CHARS
+                    and len(preview_text) > self.valves.OCR_MAX_CHARS
+                ):
+                    preview_text = (
+                        preview_text[: self.valves.OCR_MAX_CHARS] + "\n\n[...truncated]"
+                    )
+                if (
+                    self.valves.OCR_DESC_MAX_CHARS
+                    and len(preview_desc) > self.valves.OCR_DESC_MAX_CHARS
+                ):
+                    preview_desc = (
+                        preview_desc[: self.valves.OCR_DESC_MAX_CHARS]
+                        + "\n\n[...truncated]"
+                    )
 
                 lines: List[str] = []
                 lines.append("<details>")
                 lines.append("<summary>OCR Results</summary>")
                 lines.append("")
-                lines.append(f"Category: {ocr_category}" if ocr_category else "Category: (none)")
+                lines.append(
+                    f"Category: {ocr_category}" if ocr_category else "Category: (none)"
+                )
                 lines.append("")
                 lines.append("Text:")
                 lines.append(preview_text or "(no visible text)")
@@ -277,27 +288,130 @@ class Pipe:
 
             # Write back combined content
             try:
-                if isinstance(main_resp, dict) and "choices" in main_resp and main_resp["choices"]:
-                    if "message" in main_resp["choices"][0] and isinstance(main_resp["choices"][0]["message"], dict):
+                if (
+                    isinstance(main_resp, dict)
+                    and "choices" in main_resp
+                    and main_resp["choices"]
+                ):
+                    if "message" in main_resp["choices"][0] and isinstance(
+                        main_resp["choices"][0]["message"], dict
+                    ):
                         main_resp["choices"][0]["message"]["content"] = combined_content
             except Exception:
                 pass
 
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "Final answer complete.",
-                            "done": True,
-                            "hidden": False,
-                        },
-                    }
-                )
-
+            await self._emit_status_once(
+                "Final answer complete.", True, __event_emitter__, hidden=False
+            )
             return main_resp
 
-        return await generate_chat_completion(__request__, final_body, user)
+        # Streaming or non-merged fallback
+        final_body["stream"] = (
+            body.get("stream", True) if self.valves.STREAM_FINAL else False
+        )
+        resp = await generate_chat_completion(__request__, final_body, user)
+
+        # If streaming, wrap to emit completion status once
+        if final_body["stream"]:
+            if __event_emitter__:
+
+                async def on_done():
+                    await self._emit_status_once(
+                        "Final answer complete.", True, __event_emitter__, hidden=False
+                    )
+
+                return self._wrap_stream(resp, on_done)
+            return resp
+
+        # Non-streaming without merge: just emit completion
+        await self._emit_status_once(
+            "Final answer complete.", True, __event_emitter__, hidden=False
+        )
+        return resp
+
+    # Helper: status dedupe + safe emitter
+    async def _emit_status_once(
+        self,
+        description: str,
+        done: bool,
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+        hidden: bool = False,
+    ) -> None:
+        if not __event_emitter__:
+            return
+        try:
+            now = time.time()
+            ttl = float(getattr(self.valves, "STATUS_DEDUP_WINDOW_SEC", 30.0) or 0.0)
+            last = self._status_last_emit.get(description, 0.0)
+            if ttl > 0 and (now - last) < ttl:
+                return
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": description,
+                        "done": done,
+                        "hidden": hidden,
+                    },
+                }
+            )
+            self._status_last_emit[description] = now
+        except Exception:
+            # Do not let status errors break the main flow
+            pass
+
+    # Helper: wrap provider stream so we can emit a completion status exactly once
+    def _wrap_stream(
+        self,
+        stream_obj: Any,
+        on_done: Callable[[], Coroutine[Any, Any, None]],
+    ):
+        # Async stream
+        if hasattr(stream_obj, "__aiter__"):
+
+            async def agen():
+                try:
+                    async for chunk in stream_obj:
+                        yield chunk
+                finally:
+                    try:
+                        await on_done()
+                    except Exception:
+                        pass
+
+            return agen()
+
+        # Sync iterator
+        if hasattr(stream_obj, "__iter__"):
+
+            def gen():
+                try:
+                    for chunk in stream_obj:
+                        yield chunk
+                finally:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        coro = on_done()
+                        if loop.is_running():
+                            loop.create_task(coro)
+                        else:
+                            asyncio.run(coro)
+                    except Exception:
+                        pass
+
+            return gen()
+
+        # Unknown type: best-effort fire-and-forget completion
+        try:
+            loop = asyncio.get_event_loop()
+            coro = on_done()
+            if loop.is_running():
+                loop.create_task(coro)
+            else:
+                asyncio.run(coro)
+        except Exception:
+            pass
+        return stream_obj
 
     def _extract_image_artifacts(
         self, body: Dict[str, Any]
