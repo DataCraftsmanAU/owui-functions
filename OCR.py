@@ -46,6 +46,10 @@ class Pipe:
             default="Multimodal Reasoner",
             description="Display name of this pipe as shown in the model list.",
         )
+        SHOW_OCR_RESULTS: bool = Field(
+            default=False,
+            description="If true, emits OCR results as a message preview. Defaults to False (hidden).",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -194,7 +198,7 @@ class Pipe:
                 ocr_category = ", ".join(uniq_cats)
 
                 # Emit OCR results as a normal assistant message (markdown with code blocks)
-                if __event_emitter__:
+                if __event_emitter__ and self.valves.SHOW_OCR_RESULTS:
                     preview_text = ocr_text or ""
                     preview_desc = ocr_desc or ""
                     if (
