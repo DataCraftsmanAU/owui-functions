@@ -295,7 +295,7 @@ class Pipe:
                     )
 
                 await self._emit_status_once(
-                    "OCR complete.", True, __event_emitter__, hidden=False
+                    f"Composing response using {self.valves.MAIN_MODEL_ID}...", True, __event_emitter__, hidden=False
                 )
             except Exception as e:
                 # Fallback to empty results if OCR step fails
@@ -631,15 +631,6 @@ class Pipe:
                 "content": "\n".join(context_lines).strip(),
             }
             final_body["messages"].insert(0, ocr_context)
-
-        # Delegate to Open WebUI's unified chat completion (streams if requested)
-        # Emit a single "composing" status before the provider call
-        await self._emit_status_once(
-            f"Composing response using {self.valves.MAIN_MODEL_ID}...",
-            False,
-            __event_emitter__,
-            hidden=False,
-        )
 
         resp = await generate_chat_completion(__request__, final_body, user)
 
