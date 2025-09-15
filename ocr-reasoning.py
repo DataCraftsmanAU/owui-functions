@@ -1,5 +1,5 @@
 """
-title: Multimodal Reasoning Pipe
+title: OCR Reasoning Pipeline
 author: Michael Jennings
 author_url: https://datacraftsman.com.au
 funding_url: https://github.com/DataCraftsmanAU/owui-functions/
@@ -684,7 +684,7 @@ class Pipe:
 
             now = time.time()
             # Lightweight dedupe for other statuses
-            ttl = 3.0
+            ttl = 30
             # Use a composite key that includes the 'done' flag to avoid re-sending a finished status
             key = f"{description}|{int(done)}"
             last = self._status_last_emit.get(key, 0.0)
