@@ -50,6 +50,14 @@ class Pipe:
             default=False,
             description="If true, emits OCR results as a message preview. Defaults to False (hidden).",
         )
+        OCR_SYSTEM_PROMPT: str = Field(
+            default="You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image.\n- Preserve natural reading order, line breaks and headings.\n- Do not translate; keep original language.\n- Additionally, when it is relevant to understanding user intent, include a detailed but concise description of the image.\n- Always format your response using this schema:\nTEXT:\n<transcribed text>\n\n---\nDESCRIPTION:\n<description or 'N/A'>\n\n---\nCATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other",
+            description="System prompt used for per-image OCR extraction and description.",
+        )
+        OCR_MULTIIMAGE_SYSTEM_PROMPT: str = Field(
+            default="You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image(s).\n- Preserve natural reading order, line breaks and headings.\n- Do not translate; keep original language.\n- Additionally, when it is relevant to understanding user intent (e.g., quiz questions, UI screenshots, diagrams, charts, math problems, slides, whiteboards, handwritten notes, or complex scenes), include a detailed but concise description of the image(s).\n- Always format your response using this schema:\nTEXT:\n<transcribed text>\n\n---\nDESCRIPTION:\n<description or 'N/A'>\n\n---\nCATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other\n- If multiple images are present, separate each image's transcribed text in TEXT with blank lines and a line containing three dashes (---).",
+            description="System prompt used when building a single multi-image OCR request.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -211,7 +219,7 @@ class Pipe:
                     single_messages = [
                         {
                             "role": "system",
-                            "content": "You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image.\n- Preserve natural reading order, line breaks and headings.\n- Do not translate; keep original language.\n- Additionally, when it is relevant to understanding user intent, include a detailed but concise description of the image.\n- Always format your response using this schema:\nTEXT:\n<transcribed text>\n\n---\nDESCRIPTION:\n<description or 'N/A'>\n\n---\nCATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other",
+                            "content": self.valves.OCR_SYSTEM_PROMPT,
                         },
                         {
                             "role": "user",
@@ -546,7 +554,7 @@ class Pipe:
                     single_messages = [
                         {
                             "role": "system",
-                            "content": "You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image.\n- Preserve natural reading order, line breaks and headings.\n- Do not translate; keep original language.\n- Additionally, when it is relevant to understanding user intent, include a detailed but concise description of the image.\n- Always format your response using this schema:\nTEXT:\n<transcribed text>\n\n---\nDESCRIPTION:\n<description or 'N/A'>\n\n---\nCATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other",
+                            "content": self.valves.OCR_SYSTEM_PROMPT,
                         },
                         {
                             "role": "user",
@@ -929,21 +937,7 @@ class Pipe:
         for maximum multi-image compatibility across providers.
         """
         messages: List[Dict[str, Any]] = []
-        sys_content = (
-            "You are an OCR and image-understanding assistant. Extract all visible text verbatim from the provided image(s).\n"
-            "- Preserve natural reading order, line breaks and headings.\n"
-            "- Do not translate; keep original language.\n"
-            "- Additionally, when it is relevant to understanding user intent (e.g., quiz questions, UI screenshots, diagrams, charts, math problems, slides, whiteboards, handwritten notes, or complex scenes), include a detailed but concise description of the image(s).\n"
-            "- Always format your response using this schema:\n"
-            "TEXT:\n"
-            "<transcribed text>\n\n"
-            "---\n"
-            "DESCRIPTION:\n"
-            "<description or 'N/A'>\n\n"
-            "---\n"
-            "CATEGORY: screenshot|document|diagram|math|slide|whiteboard|handwritten_note|photo|other\n"
-            "- If multiple images are present, separate each image's transcribed text in TEXT with blank lines and a line containing three dashes (---)."
-        )
+        sys_content = self.valves.OCR_MULTIIMAGE_SYSTEM_PROMPT
         messages.append({"role": "system", "content": sys_content})
 
         # Normalize into a single content list
