@@ -1,8 +1,9 @@
 """
-title: OCR Reasoning Pipeline
+title: Multimodal Reasoning Pipe
 author: Michael Jennings
 author_url: https://datacraftsman.com.au
 funding_url: https://github.com/DataCraftsmanAU/owui-functions/
+description: Preprocesses images with OCR and Image descriptions using a vision model before passing the text to a reasoning model. Configurable with valves.
 version: 1.0
 license: MIT
 """
@@ -95,6 +96,7 @@ class Pipe:
             # Compute number of images to be processed
             try:
                 image_count = 0
+                
                 # Normalize all detected image artifacts into a single list to count
                 def _count_images_for_status(
                     last_user_images: List[str],
